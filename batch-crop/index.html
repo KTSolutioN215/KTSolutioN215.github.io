@@ -92,6 +92,7 @@ progress{width:100%;height:10px;accent-color:var(--accent)}
       <h2>3. 書き出し</h2>
       <label>形式</label>
       <select id="fmt">
+        <option value="pdf">PDF（1冊にまとめる・GoodNotes向け）</option>
         <option value="keep">元と同じ</option>
         <option value="image/jpeg">JPEG（軽い）</option>
         <option value="image/png">PNG（劣化なし）</option>
@@ -100,12 +101,15 @@ progress{width:100%;height:10px;accent-color:var(--accent)}
       <div class="row"><label>保存方法</label>
         <select id="dest">
           <option value="folder">フォルダに直接保存（PCのChrome/Edge推奨）</option>
-          <option value="zip">ZIPでダウンロード</option>
+          <option value="zip">ダウンロード</option>
         </select>
       </div>
-      <div class="row" id="splitRow"><label>ZIP 1つあたりの枚数</label>
-        <input type="number" id="split" min="10" value="300"></div>
-      <div class="row"><button class="primary" id="run" disabled style="width:100%">一括カット開始</button></div>
+      <div class="row" id="splitRow"><label id="splitLabel">ZIP 1つあたりの枚数</label>
+        <input type="number" id="split" min="0" value="300"></div>
+      <div class="row" id="pdfRow"><label>PDF 1冊あたりのページ数（0 = 分けない）</label>
+        <input type="number" id="pdfSplit" min="0" value="0"></div>
+      <p class="hint" id="pdfHint">カット済みの画像をPDFにするだけなら、カット量は0のままでOKです。</p>
+      <div class="row"><button class="primary" id="run" disabled style="width:100%">書き出し開始</button></div>
       <div class="row"><progress id="prog" value="0" max="1"></progress></div>
       <div id="log"></div>
     </section>
@@ -261,29 +265,63 @@ drop.addEventListener('drop', e => {
 // ---- export ----
 const canFolder = 'showDirectoryPicker' in window;
 if (!canFolder){ $('dest').value = 'zip'; $('dest').options[0].disabled = true; }
-const toggleSplit = () => $('splitRow').style.display = $('dest').value === 'zip' ? 'block' : 'none';
-$('dest').onchange = toggleSplit; toggleSplit();
+function toggleRows(){
+  const pdf = $('fmt').value === 'pdf';
+  $('pdfRow').style.display = pdf ? 'block' : 'none';
+  $('pdfHint').style.display = pdf ? 'block' : 'none';
+  $('splitRow').style.display = (!pdf && $('dest').value === 'zip') ? 'block' : 'none';
+}
+$('dest').onchange = toggleRows; $('fmt').onchange = toggleRows; toggleRows();
 
 const extOf = mime => ({'image/jpeg':'jpg','image/png':'png','image/webp':'webp'})[mime];
 function outMime(name){
   const f = $('fmt').value;
+  if (f === 'pdf') return 'image/jpeg';
   if (f !== 'keep') return f;
   if (/\.jpe?g$/i.test(name)) return 'image/jpeg';
   if (/\.webp$/i.test(name)) return 'image/webp';
   return 'image/png';
 }
+const noCrop = () => !crop.t && !crop.b && !crop.l && !crop.r;
+
+// number of color components of a JPEG (1 = gray, 3 = RGB, 4 = CMYK), or 0 if unknown
+async function jpegComponents(blob){
+  const b = new Uint8Array(await blob.slice(0, 131072).arrayBuffer());
+  if (b[0] !== 0xFF || b[1] !== 0xD8) return 0;
+  let i = 2;
+  while (i + 9 < b.length){
+    if (b[i] !== 0xFF){ i++; continue; }
+    const m = b[i+1];
+    if (m >= 0xC0 && m <= 0xCF && m !== 0xC4 && m !== 0xC8 && m !== 0xCC) return b[i+9];
+    if (m === 0xD8 || (m >= 0xD0 && m <= 0xD7) || m === 0x01 || m === 0xFF){ i += 2; continue; }
+    i += 2 + ((b[i+2] << 8) | b[i+3]);
+  }
+  return 0;
+}
+
 async function cropOne(item){
-  const bmp = await decode(item);
+  const src = await item.getBlob();
+  const bmp = await createImageBitmap(src);
+  const mime = outMime(item.name);
+  const base = item.name.split('/').pop().replace(/\.[^.]+$/, '');
+  // already-cropped JPEG going into a PDF: embed the original bytes as-is (no quality loss)
+  if ($('fmt').value === 'pdf' && noCrop()){
+    const comps = await jpegComponents(src);
+    if (comps === 1 || comps === 3){
+      const r = {blob: src, w: bmp.width, h: bmp.height, comps, fname: base + '.jpg'};
+      bmp.close(); return r;
+    }
+  }
   const c = scaled(bmp.width, bmp.height);
   const w = bmp.width - c.l - c.r, h = bmp.height - c.t - c.b;
   if (w <= 0 || h <= 0) throw new Error('カット量が大きすぎます');
   const cv = new OffscreenCanvas(w, h);
-  cv.getContext('2d').drawImage(bmp, c.l, c.t, w, h, 0, 0, w, h);
+  const cx = cv.getContext('2d');
+  if (mime === 'image/jpeg'){ cx.fillStyle = '#fff'; cx.fillRect(0, 0, w, h); }
+  cx.drawImage(bmp, c.l, c.t, w, h, 0, 0, w, h);
   bmp.close();
-  const mime = outMime(item.name);
   const blob = await cv.convertToBlob({type: mime, quality: 0.92});
-  const base = item.name.split('/').pop().replace(/\.[^.]+$/, '');
-  return {blob, fname: base + '.' + extOf(mime)};
+  return {blob, w, h, comps: 3, fname: base + '.' + extOf(mime)};
 }
 function download(blob, name){
   const a = document.createElement('a');
@@ -292,9 +330,58 @@ function download(blob, name){
   setTimeout(() => URL.revokeObjectURL(a.href), 60000);
 }
 
+// Minimal streaming PDF writer: one JPEG per page, page size = image size (96dpi)
+class PdfWriter {
+  constructor(sink){ this.sink = sink; this.pos = 0; this.offs = []; this.pages = []; }
+  async put(x){
+    if (typeof x === 'string'){ await this.sink(x); this.pos += x.length; }
+    else { await this.sink(x); this.pos += x.size; }
+  }
+  async obj(n, body){ this.offs[n] = this.pos; await this.put(n + ' 0 obj\n' + body + '\nendobj\n'); }
+  async begin(){ await this.put('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n'); this.next = 3; }
+  async addPage(img){
+    const im = this.next++, ct = this.next++, pg = this.next++;
+    const W = (img.w * 0.75).toFixed(2), H = (img.h * 0.75).toFixed(2);
+    this.offs[im] = this.pos;
+    await this.put(im + ' 0 obj\n<< /Type /XObject /Subtype /Image /Width ' + img.w + ' /Height ' + img.h +
+      ' /ColorSpace /' + (img.comps === 1 ? 'DeviceGray' : 'DeviceRGB') +
+      ' /BitsPerComponent 8 /Filter /DCTDecode /Length ' + img.blob.size + ' >>\nstream\n');
+    await this.put(img.blob);
+    await this.put('\nendstream\nendobj\n');
+    const s = 'q ' + W + ' 0 0 ' + H + ' 0 0 cm /Im Do Q';
+    await this.obj(ct, '<< /Length ' + s.length + ' >>\nstream\n' + s + '\nendstream');
+    await this.obj(pg, '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + W + ' ' + H + '] ' +
+      '/Resources << /XObject << /Im ' + im + ' 0 R >> >> /Contents ' + ct + ' 0 R >>');
+    this.pages.push(pg);
+  }
+  async end(){
+    await this.obj(1, '<< /Type /Catalog /Pages 2 0 R >>');
+    await this.obj(2, '<< /Type /Pages /Count ' + this.pages.length + ' /Kids [' +
+      this.pages.map(p => p + ' 0 R').join(' ') + '] >>');
+    const xref = this.pos, n = this.next;
+    let t = 'xref\n0 ' + n + '\n0000000000 65535 f \n';
+    for (let i = 1; i < n; i++) t += String(this.offs[i]).padStart(10, '0') + ' 00000 n \n';
+    t += 'trailer\n<< /Size ' + n + ' /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF\n';
+    await this.put(t);
+  }
+}
+// strings in the writer are pure single-byte, so encode them as latin1 bytes
+const latin1 = s => { const a = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i); return a; };
+
+async function openPdf(dir, name){
+  if (dir){
+    const fh = await dir.getFileHandle(name, {create:true});
+    const w = await fh.createWritable();
+    return {sink: x => w.write(typeof x === 'string' ? latin1(x) : x), close: () => w.close()};
+  }
+  const parts = [];
+  return {sink: x => { parts.push(typeof x === 'string' ? latin1(x) : x); },
+          close: () => download(new Blob(parts, {type:'application/pdf'}), name)};
+}
+
 $('run').onclick = async () => {
   if (!items.length) return;
-  const dest = $('dest').value;
+  const dest = $('dest').value, isPdf = $('fmt').value === 'pdf';
   let dir = null;
   if (dest === 'folder'){
     try { dir = await window.showDirectoryPicker({mode:'readwrite'}); }
@@ -302,13 +389,35 @@ $('run').onclick = async () => {
   }
   $('run').disabled = true;
   const prog = $('prog'); prog.max = items.length; prog.value = 0;
-  const per = Math.max(10, parseInt($('split').value) || 300);
-  const parts = Math.ceil(items.length / per);
-  let zip = dest === 'zip' ? new JSZip() : null, part = 1;
-  const used = new Set();
+  const total = items.length;
   try {
-    for (let i = 0; i < items.length; i++){
-      let {blob, fname} = await cropOne(items[i]);
+    if (isPdf){
+      const n = parseInt($('pdfSplit').value) || 0;
+      const per = n > 0 ? n : total, parts = Math.ceil(total / per);
+      const stem = (items[0].name.split('/').length > 1 ? items[0].name.split('/')[0] : 'cropped');
+      for (let p = 0; p < parts; p++){
+        const name = parts > 1 ? stem + '_' + String(p+1).padStart(2,'0') + '.pdf' : stem + '.pdf';
+        const out = await openPdf(dir, name);
+        const pdf = new PdfWriter(out.sink);
+        await pdf.begin();
+        for (let i = p*per; i < Math.min(total, (p+1)*per); i++){
+          await pdf.addPage(await cropOne(items[i]));
+          prog.value = i + 1;
+          if (i % 5 === 0) log((i+1) + ' / ' + total + ' ページ処理済み');
+        }
+        log('PDFを保存中…' + (parts > 1 ? '（' + (p+1) + ' / ' + parts + '）' : ''));
+        await pdf.end(); await out.close();
+        if (!dir && parts > 1) await new Promise(r => setTimeout(r, 1500));
+      }
+      log('完了しました（' + total + 'ページ）');
+      return;
+    }
+    const per = Math.max(10, parseInt($('split').value) || 300);
+    const parts = Math.ceil(total / per);
+    let zip = dest === 'zip' ? new JSZip() : null, part = 1;
+    const used = new Set();
+    for (let i = 0; i < total; i++){
+      const {blob, fname} = await cropOne(items[i]);
       let n = 2, uniq = fname;
       while (used.has(uniq)) uniq = fname.replace(/(\.[^.]+)$/, '_' + (n++) + '$1');
       used.add(uniq);
@@ -317,19 +426,18 @@ $('run').onclick = async () => {
         const w = await fh.createWritable(); await w.write(blob); await w.close();
       } else {
         zip.file(uniq, blob);
-        const last = i === items.length - 1;
-        if ((i+1) % per === 0 || last){
+        if ((i+1) % per === 0 || i === total - 1){
           log('ZIPを作成中…（' + part + ' / ' + parts + '）');
           const out = await zip.generateAsync({type:'blob', compression:'STORE'});
           download(out, parts > 1 ? 'cropped_' + String(part).padStart(2,'0') + '.zip' : 'cropped.zip');
           zip = new JSZip(); part++;
-          await new Promise(r => setTimeout(r, 1500)); // let the browser start each download
+          await new Promise(r => setTimeout(r, 1500));
         }
       }
       prog.value = i + 1;
-      if (i % 5 === 0) log((i+1) + ' / ' + items.length + ' 枚処理済み');
+      if (i % 5 === 0) log((i+1) + ' / ' + total + ' 枚処理済み');
     }
-    log('完了しました（' + items.length + '枚）');
+    log('完了しました（' + total + '枚）');
   } catch (err){
     log('エラー：' + err.message);
   } finally {
