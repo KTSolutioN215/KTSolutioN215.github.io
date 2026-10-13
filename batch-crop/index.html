@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>一括トリミング</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+:root{
+  --bg:#f5f5f2; --panel:#ffffff; --ink:#1d1f21; --muted:#6b6f73; --line:#dcdcd6;
+  --accent:#d9480f; --accent-ink:#fff; --shade:rgba(20,20,20,.55);
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#16181a; --panel:#1f2225; --ink:#e8e8e4; --muted:#9a9ea2; --line:#33373b;
+    --accent:#ff7a3d; --accent-ink:#16181a; --shade:rgba(0,0,0,.6); }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.6 "Hiragino Sans","Noto Sans JP","Yu Gothic UI",system-ui,sans-serif}
+header{padding:20px 16px 8px;max-width:1100px;margin:auto}
+h1{font-size:22px;margin:0;letter-spacing:.02em}
+header p{margin:4px 0 0;color:var(--muted);font-size:13px}
+main{max-width:1100px;margin:auto;padding:8px 16px 40px;display:grid;gap:16px;
+  grid-template-columns:minmax(0,1fr) 300px}
+@media (max-width:820px){main{grid-template-columns:1fr}}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+h2{font-size:13px;margin:0 0 10px;color:var(--muted);font-weight:600;letter-spacing:.05em}
+.drop{border:2px dashed var(--line);border-radius:10px;padding:22px;text-align:center;color:var(--muted)}
+.drop.over{border-color:var(--accent);color:var(--ink)}
+.btns{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:10px}
+button,.filebtn{appearance:none;border:1px solid var(--line);background:var(--panel);color:var(--ink);
+  padding:8px 12px;border-radius:8px;font:inherit;font-size:14px;cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:700}
+button:disabled{opacity:.45;cursor:default}
+.filebtn input{display:none}
+#stageWrap{position:relative;user-select:none;touch-action:none;margin-top:12px;display:none}
+#stage{display:block;width:100%;height:auto;border-radius:6px;background:#888;cursor:crosshair}
+.nav{display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap}
+.nav span{color:var(--muted);font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+label{font-size:12px;color:var(--muted);display:block}
+input[type=number],select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:6px;
+  background:var(--bg);color:var(--ink);font:inherit}
+.row{margin-top:10px}
+.hint{font-size:12px;color:var(--muted);margin:8px 0 0}
+progress{width:100%;height:10px;accent-color:var(--accent)}
+#log{font-size:12px;color:var(--muted);margin-top:6px;min-height:1.6em;word-break:break-all}
+.size{font-size:12px;color:var(--muted);margin-top:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>一括トリミング</h1>
+  <p>スクショの余白やツールバーを、全部の画像から同じ位置でまとめてカットします。画像はブラウザ内だけで処理され、どこにも送信されません。</p>
+</header>
+<main>
+  <div>
+    <section>
+      <h2>1. 画像を読み込む</h2>
+      <div class="drop" id="drop">ZIP か画像をここにドロップ
+        <div class="btns">
+          <label class="filebtn">ZIPを選ぶ<input type="file" id="zipIn" accept=".zip,application/zip"></label>
+          <label class="filebtn">画像を選ぶ<input type="file" id="imgIn" accept="image/*" multiple></label>
+          <label class="filebtn">フォルダを選ぶ<input type="file" id="dirIn" webkitdirectory multiple></label>
+        </div>
+      </div>
+      <div id="stageWrap"><canvas id="stage"></canvas></div>
+      <div class="nav" id="nav" style="display:none">
+        <button id="prev">◀</button><button id="next">▶</button>
+        <span id="name"></span>
+      </div>
+      <p class="hint" id="dragHint" style="display:none">画像の上をドラッグして「残したい範囲」を囲んでください。◀▶で他のページでもズレがないか確認できます。</p>
+    </section>
+  </div>
+  <div>
+    <section>
+      <h2>2. カット量（ピクセル）</h2>
+      <div class="grid">
+        <div><label>上</label><input type="number" id="cTop" min="0" value="0"></div>
+        <div><label>下</label><input type="number" id="cBottom" min="0" value="0"></div>
+        <div><label>左</label><input type="number" id="cLeft" min="0" value="0"></div>
+        <div><label>右</label><input type="number" id="cRight" min="0" value="0"></div>
+      </div>
+      <div class="row" style="display:flex;gap:8px;flex-wrap:wrap">
+        <button id="autoLR">左右の余白を自動検出</button>
+        <button id="reset">リセット</button>
+      </div>
+      <div class="size" id="outSize"></div>
+      <p class="hint">サイズが違う画像は、比率に合わせて同じ割合でカットします。</p>
+    </section>
+    <section style="margin-top:16px">
+      <h2>3. 書き出し</h2>
+      <label>形式</label>
+      <select id="fmt">
+        <option value="keep">元と同じ</option>
+        <option value="image/jpeg">JPEG（軽い）</option>
+        <option value="image/png">PNG（劣化なし）</option>
+        <option value="image/webp">WebP（さらに軽い）</option>
+      </select>
+      <div class="row"><label>保存方法</label>
+        <select id="dest">
+          <option value="folder">フォルダに直接保存（PCのChrome/Edge推奨）</option>
+          <option value="zip">ZIPでダウンロード</option>
+        </select>
+      </div>
+      <div class="row" id="splitRow"><label>ZIP 1つあたりの枚数</label>
+        <input type="number" id="split" min="10" value="300"></div>
+      <div class="row"><button class="primary" id="run" disabled style="width:100%">一括カット開始</button></div>
+      <div class="row"><progress id="prog" value="0" max="1"></progress></div>
+      <div id="log"></div>
+    </section>
+  </div>
+</main>
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const IMG_RE = /\.(png|jpe?g|webp|bmp|gif)$/i;
+const collator = new Intl.Collator('ja', {numeric:true, sensitivity:'base'});
+let items = [];          // {name, getBlob: async()=>Blob}
+let idx = 0, cur = null; // current ImageBitmap
+let baseW = 0, baseH = 0;
+
+const crop = {t:0,b:0,l:0,r:0};
+const inputs = {t:$('cTop'), b:$('cBottom'), l:$('cLeft'), r:$('cRight')};
+const log = s => $('log').textContent = s;
+
+// ---- loading ----
+async function loadZip(file){
+  log('ZIPを読み込み中…（大きいと少し時間がかかります）');
+  const zip = await JSZip.loadAsync(file);
+  const list = [];
+  zip.forEach((path, entry) => {
+    if (!entry.dir && IMG_RE.test(path) && !path.includes('__MACOSX/') && !/(^|\/)\./.test(path))
+      list.push({name: path, getBlob: () => entry.async('blob')});
+  });
+  setItems(list);
+}
+function loadFiles(files){
+  const list = [...files].filter(f => IMG_RE.test(f.name))
+    .map(f => ({name: f.webkitRelativePath || f.name, getBlob: async () => f}));
+  setItems(list);
+}
+async function setItems(list){
+  list.sort((a,b) => collator.compare(a.name, b.name));
+  items = list; idx = 0;
+  if (!items.length){ log('画像が見つかりませんでした'); return; }
+  log(items.length + '枚の画像を読み込みました');
+  $('stageWrap').style.display = 'block';
+  $('nav').style.display = 'flex';
+  $('dragHint').style.display = 'block';
+  $('run').disabled = false;
+  await show(0, true);
+}
+async function decode(item){
+  const blob = await item.getBlob();
+  return await createImageBitmap(blob);
+}
+async function show(i, first){
+  idx = Math.max(0, Math.min(items.length-1, i));
+  if (cur) cur.close();
+  cur = await decode(items[idx]);
+  if (first){ baseW = cur.width; baseH = cur.height; }
+  $('name').textContent = (idx+1) + ' / ' + items.length + '　' + items[idx].name;
+  draw();
+}
+
+// ---- drawing ----
+const stage = $('stage'), ctx = stage.getContext('2d');
+function scaled(w, h){ // crop scaled to an image of size w,h
+  const sx = w / baseW, sy = h / baseH;
+  return {t:Math.round(crop.t*sy), b:Math.round(crop.b*sy), l:Math.round(crop.l*sx), r:Math.round(crop.r*sx)};
+}
+function draw(){
+  if (!cur) return;
+  stage.width = cur.width; stage.height = cur.height;
+  ctx.drawImage(cur, 0, 0);
+  const c = scaled(cur.width, cur.height);
+  const W = cur.width, H = cur.height;
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--shade');
+  ctx.fillRect(0, 0, W, c.t);
+  ctx.fillRect(0, H-c.b, W, c.b);
+  ctx.fillRect(0, c.t, c.l, H-c.t-c.b);
+  ctx.fillRect(W-c.r, c.t, c.r, H-c.t-c.b);
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent');
+  ctx.lineWidth = Math.max(2, W/400);
+  ctx.strokeRect(c.l, c.t, W-c.l-c.r, H-c.t-c.b);
+  $('outSize').textContent = '書き出しサイズ：' + Math.max(0,W-c.l-c.r) + ' × ' + Math.max(0,H-c.t-c.b) + ' px';
+}
+function syncInputs(){ for (const k in inputs) inputs[k].value = crop[k]; draw(); }
+for (const k in inputs) inputs[k].addEventListener('input', () => {
+  crop[k] = Math.max(0, parseInt(inputs[k].value) || 0); draw();
+});
+
+// drag to select the area to keep (coords in base-image pixels)
+let dragStart = null;
+function toImg(e){
+  const r = stage.getBoundingClientRect();
+  const x = (e.clientX - r.left) / r.width * baseW, y = (e.clientY - r.top) / r.height * baseH;
+  return {x: Math.max(0, Math.min(baseW, x)), y: Math.max(0, Math.min(baseH, y))};
+}
+stage.addEventListener('pointerdown', e => { if (!cur) return; dragStart = toImg(e); stage.setPointerCapture(e.pointerId); });
+stage.addEventListener('pointermove', e => {
+  if (!dragStart) return;
+  const p = toImg(e);
+  const x0 = Math.min(dragStart.x, p.x), x1 = Math.max(dragStart.x, p.x);
+  const y0 = Math.min(dragStart.y, p.y), y1 = Math.max(dragStart.y, p.y);
+  if (x1 - x0 < 5 || y1 - y0 < 5) return;
+  crop.l = Math.round(x0); crop.r = Math.round(baseW - x1);
+  crop.t = Math.round(y0); crop.b = Math.round(baseH - y1);
+  syncInputs();
+});
+['pointerup','pointercancel'].forEach(ev => stage.addEventListener(ev, () => dragStart = null));
+
+// auto detect plain left/right margins on the current image
+$('autoLR').onclick = () => {
+  if (!cur) return;
+  const W = cur.width, H = cur.height;
+  const c = scaled(W, H);
+  const y0 = c.t, y1 = H - c.b;
+  if (y1 - y0 < 10) return;
+  const cv = new OffscreenCanvas(W, y1 - y0), cx = cv.getContext('2d');
+  cx.drawImage(cur, 0, y0, W, y1-y0, 0, 0, W, y1-y0);
+  const d = cx.getImageData(0, 0, W, y1-y0).data, h = y1 - y0;
+  const step = Math.max(1, Math.floor(h / 400));
+  // a column belongs to the margin if almost all of it matches the outer edge's color
+  const isPlain = (x, edge) => {
+    const m = (Math.floor(h/2)*W + edge)*4, r0 = d[m], g0 = d[m+1], b0 = d[m+2];
+    let bad = 0, n = 0;
+    for (let y = 0; y < h; y += step, n++){
+      const i = (y*W + x)*4;
+      if (Math.abs(d[i]-r0) + Math.abs(d[i+1]-g0) + Math.abs(d[i+2]-b0) > 30) bad++;
+    }
+    return bad <= n * 0.02;
+  };
+  let L = 0; while (L < W/2 && isPlain(L, 0)) L++;
+  let R = 0; while (R < W/2 && isPlain(W-1-R, W-1)) R++;
+  if (L >= W/2) L = 0;
+  if (R >= W/2) R = 0;
+  crop.l = Math.round(L * baseW / W); crop.r = Math.round(R * baseW / W);
+  syncInputs();
+  log('左右の余白を検出しました（左 ' + crop.l + ' / 右 ' + crop.r + ' px）');
+};
+$('reset').onclick = () => { crop.t = crop.b = crop.l = crop.r = 0; syncInputs(); };
+$('prev').onclick = () => show(idx-1);
+$('next').onclick = () => show(idx+1);
+
+// ---- inputs ----
+$('zipIn').onchange = e => e.target.files[0] && loadZip(e.target.files[0]);
+$('imgIn').onchange = e => loadFiles(e.target.files);
+$('dirIn').onchange = e => loadFiles(e.target.files);
+const drop = $('drop');
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', e => {
+  e.preventDefault(); drop.classList.remove('over');
+  const fs = [...e.dataTransfer.files];
+  const z = fs.find(f => /\.zip$/i.test(f.name));
+  z ? loadZip(z) : loadFiles(fs);
+});
+
+// ---- export ----
+const canFolder = 'showDirectoryPicker' in window;
+if (!canFolder){ $('dest').value = 'zip'; $('dest').options[0].disabled = true; }
+const toggleSplit = () => $('splitRow').style.display = $('dest').value === 'zip' ? 'block' : 'none';
+$('dest').onchange = toggleSplit; toggleSplit();
+
+const extOf = mime => ({'image/jpeg':'jpg','image/png':'png','image/webp':'webp'})[mime];
+function outMime(name){
+  const f = $('fmt').value;
+  if (f !== 'keep') return f;
+  if (/\.jpe?g$/i.test(name)) return 'image/jpeg';
+  if (/\.webp$/i.test(name)) return 'image/webp';
+  return 'image/png';
+}
+async function cropOne(item){
+  const bmp = await decode(item);
+  const c = scaled(bmp.width, bmp.height);
+  const w = bmp.width - c.l - c.r, h = bmp.height - c.t - c.b;
+  if (w <= 0 || h <= 0) throw new Error('カット量が大きすぎます');
+  const cv = new OffscreenCanvas(w, h);
+  cv.getContext('2d').drawImage(bmp, c.l, c.t, w, h, 0, 0, w, h);
+  bmp.close();
+  const mime = outMime(item.name);
+  const blob = await cv.convertToBlob({type: mime, quality: 0.92});
+  const base = item.name.split('/').pop().replace(/\.[^.]+$/, '');
+  return {blob, fname: base + '.' + extOf(mime)};
+}
+function download(blob, name){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+
+$('run').onclick = async () => {
+  if (!items.length) return;
+  const dest = $('dest').value;
+  let dir = null;
+  if (dest === 'folder'){
+    try { dir = await window.showDirectoryPicker({mode:'readwrite'}); }
+    catch { return; }
+  }
+  $('run').disabled = true;
+  const prog = $('prog'); prog.max = items.length; prog.value = 0;
+  const per = Math.max(10, parseInt($('split').value) || 300);
+  const parts = Math.ceil(items.length / per);
+  let zip = dest === 'zip' ? new JSZip() : null, part = 1;
+  const used = new Set();
+  try {
+    for (let i = 0; i < items.length; i++){
+      let {blob, fname} = await cropOne(items[i]);
+      let n = 2, uniq = fname;
+      while (used.has(uniq)) uniq = fname.replace(/(\.[^.]+)$/, '_' + (n++) + '$1');
+      used.add(uniq);
+      if (dir){
+        const fh = await dir.getFileHandle(uniq, {create:true});
+        const w = await fh.createWritable(); await w.write(blob); await w.close();
+      } else {
+        zip.file(uniq, blob);
+        const last = i === items.length - 1;
+        if ((i+1) % per === 0 || last){
+          log('ZIPを作成中…（' + part + ' / ' + parts + '）');
+          const out = await zip.generateAsync({type:'blob', compression:'STORE'});
+          download(out, parts > 1 ? 'cropped_' + String(part).padStart(2,'0') + '.zip' : 'cropped.zip');
+          zip = new JSZip(); part++;
+          await new Promise(r => setTimeout(r, 1500)); // let the browser start each download
+        }
+      }
+      prog.value = i + 1;
+      if (i % 5 === 0) log((i+1) + ' / ' + items.length + ' 枚処理済み');
+    }
+    log('完了しました（' + items.length + '枚）');
+  } catch (err){
+    log('エラー：' + err.message);
+  } finally {
+    $('run').disabled = false;
+  }
+};
+})();
+</script>
+</body>
+</html>
